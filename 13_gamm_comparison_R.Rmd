@@ -1,0 +1,616 @@
+---
+title: "GAMM Model Comparison: Parallel vs Divergent Group Effects"
+author: ""
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: cosmo
+    code_folding: show
+    fig_width: 10
+    fig_height: 6
+---
+
+<!-- To render this file from a PowerShell terminal:
+  $env:RSTUDIO_PANDOC = "C:\Program Files\RStudio\resources\app\bin\quarto\bin\tools"
+  & "C:\Program Files\R\R-4.5.2\bin\Rscript.exe" -e "rmarkdown::render('13_gamm_comparison_R.Rmd')"
+-->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  dpi = 150,
+  fig.path = "13_gamm_comparison_R_figures/"
+)
+set.seed(42)
+```
+
+# 1. Setup
+
+```{r packages}
+library(tidyverse)
+library(mgcv)
+library(gratia)
+
+# Project-wide group colors (match notebooks 02/03 and 15_spaghetti_plots_R.Rmd)
+group_cols <- c(
+  "CONTROL" = "#377EB8",
+  "GLAUCOMA - URAMOX" = "#E41A1C",
+  "GLAUCOMA + URAMOX" = "#4DAF4A"
+)
+condition_cols <- c("CONTROL" = "#377EB8", "GLAUCOMA" = "#E41A1C")
+contrast_cols <- c(
+  "GLAUCOMA\u2212URAMOX vs CONTROL" = "#E41A1C",
+  "GLAUCOMA+URAMOX vs CONTROL" = "#4DAF4A"
+)
+
+# Display labels for figures
+LABEL_MAP <- c(
+  "CONTROL"                        = "control",
+  "GLAUCOMA - URAMOX"              = "glaucoma without oral acetazolamide",
+  "GLAUCOMA + URAMOX"              = "glaucoma with oral acetazolamide",
+  "GLAUCOMA"                       = "glaucoma",
+  "GLAUCOMA\u2212URAMOX vs CONTROL" = "glaucoma without oral acetazolamide vs control",
+  "GLAUCOMA+URAMOX vs CONTROL"     = "glaucoma with oral acetazolamide vs control"
+)
+```
+
+```{r load-data}
+df <- read_csv("results/eye_liquid_spread_measurements.csv") %>%
+  mutate(
+    group = factor(group, levels = c("CONTROL", "GLAUCOMA - URAMOX", "GLAUCOMA + URAMOX")),
+    case  = factor(case),
+    condition = factor(
+      ifelse(grepl("GLAUCOMA", group), "GLAUCOMA", "CONTROL"),
+      levels = c("CONTROL", "GLAUCOMA")
+    )
+  )
+```
+
+```{r data-summary}
+df %>%
+  group_by(group) %>%
+  summarise(
+    n_cases   = n_distinct(case),
+    n_obs     = n(),
+    time_min  = min(time_sec),
+    time_max  = max(time_sec),
+    area_mean = mean(area_cm2),
+    area_sd   = sd(area_cm2),
+    .groups   = "drop"
+  ) %>%
+  knitr::kable(digits = 3, caption = "Summary statistics by group")
+```
+
+# 2. Two-Group Comparison (CONTROL vs GLAUCOMA)
+
+We fit two nested models that differ in how group affects the time trajectory:
+
+- **Parallel**: `area ~ condition + s(time) + s(time, case, bs="fs")` — one master
+  non-linear shape; groups are shifted vertically.
+- **Divergent**: `area ~ condition + s(time, by=condition) + s(time, case, bs="fs")` —
+  each group gets its own non-linear shape; no redundant global smooth.
+
+Both models use ML for valid likelihood-based comparison.
+
+## Fit Models
+
+```{r fit-2g}
+m_par_2g <- gam(
+  area_cm2 ~ condition +
+    s(time_sec, k = 20, bs = "cr") +
+    s(time_sec, case, bs = "fs", k = 10),
+  data = df, method = "ML"
+)
+
+m_div_2g <- gam(
+  area_cm2 ~ condition +
+    s(time_sec, by = condition, k = 20, bs = "cr") +
+    s(time_sec, case, bs = "fs", k = 10),
+  data = df, method = "ML"
+)
+```
+
+## Model Summaries
+
+```{r summary-par-2g}
+summary(m_par_2g)
+```
+
+```{r summary-div-2g}
+summary(m_div_2g)
+```
+
+## Parametric Coefficients (Intercepts)
+
+The parametric terms capture the mean level for each group. In the Parallel model
+the group coefficient is the *entire* constant vertical shift between curves;
+in the Divergent model the group-specific smooths absorb shape differences, so
+the coefficient reflects the *residual* mean-level offset after accounting for
+different shapes.
+
+```{r coef-2g}
+ptab_par_2g <- as.data.frame(summary(m_par_2g)$p.table) %>%
+  rownames_to_column("Term") %>%
+  mutate(Model = "Parallel")
+ptab_div_2g <- as.data.frame(summary(m_div_2g)$p.table) %>%
+  rownames_to_column("Term") %>%
+  mutate(Model = "Divergent")
+
+coef_2g <- bind_rows(ptab_par_2g, ptab_div_2g) %>%
+  select(Model, Term, Estimate, `Std. Error`, `t value`, `Pr(>|t|)`)
+
+knitr::kable(coef_2g, digits = 4,
+             caption = "Parametric coefficients — 2-group models")
+```
+
+```{r coef-interpret-2g, results='asis'}
+get_coef <- function(model, term) {
+  tab <- summary(model)$p.table
+  list(est = tab[term, "Estimate"],
+       se  = tab[term, "Std. Error"],
+       p   = tab[term, "Pr(>|t|)"])
+}
+
+par_grp_2g <- get_coef(m_par_2g, "conditionGLAUCOMA")
+div_grp_2g <- get_coef(m_div_2g, "conditionGLAUCOMA")
+
+cat("### Intercept Conclusions — 2-Group\n\n")
+cat(sprintf("- **Parallel model**: GLAUCOMA shifts area by **%.3f cm\u00b2** ",
+            par_grp_2g$est))
+cat(sprintf("(SE = %.3f, p = %.4f) relative to CONTROL.\n", par_grp_2g$se, par_grp_2g$p))
+cat(sprintf("- **Divergent model**: GLAUCOMA shifts area by **%.3f cm\u00b2** ",
+            div_grp_2g$est))
+cat(sprintf("(SE = %.3f, p = %.4f) relative to CONTROL.\n\n", div_grp_2g$se, div_grp_2g$p))
+
+shift_change <- abs(par_grp_2g$est - div_grp_2g$est)
+cat(sprintf("The group intercept changes by %.3f cm\u00b2 between models. ", shift_change))
+if (shift_change < 0.1 * abs(par_grp_2g$est)) {
+  cat("This is a small change (&lt; 10% of the Parallel estimate), indicating that ",
+      "the baseline shift is robust regardless of whether group-specific shapes are ",
+      "allowed.\n\n")
+} else {
+  cat("This is a notable change, suggesting that allowing different shapes absorbs ",
+      "some of what the Parallel model attributed to the intercept shift.\n\n")
+}
+
+if (par_grp_2g$p < 0.05 && div_grp_2g$p < 0.05) {
+  cat("The group intercept is **significant in both models** (p &lt; 0.05), confirming ",
+      "that GLAUCOMA and CONTROL differ in their mean area level.\n")
+} else if (par_grp_2g$p < 0.05 && div_grp_2g$p >= 0.05) {
+  cat("The group intercept is **significant in the Parallel model but not in the ",
+      "Divergent model**. This suggests that what appears as a level shift in the ",
+      "Parallel model is partly explained by different curve shapes in the Divergent model.\n")
+} else if (par_grp_2g$p >= 0.05 && div_grp_2g$p >= 0.05) {
+  cat("The group intercept is **not significant in either model** (p &ge; 0.05). ",
+      "There is no evidence of a mean-level difference between groups.\n")
+} else {
+  cat("The group intercept is non-significant in the Parallel model but significant ",
+      "in the Divergent model &mdash; an unusual pattern that warrants careful inspection.\n")
+}
+```
+
+## AIC Comparison
+
+$$\text{AIC} = 2k - 2\ln(L)$$
+
+where $L$ is the maximum likelihood and $k$ is the effective degrees of freedom.
+Lower AIC is better; $\Delta\text{AIC} > 2$ indicates a meaningful difference,
+$> 10$ indicates strong evidence.
+
+```{r aic-2g}
+aic_2g <- AIC(m_par_2g, m_div_2g) %>%
+  as.data.frame() %>%
+  rownames_to_column("model") %>%
+  mutate(
+    model = c("Parallel", "Divergent"),
+    delta_AIC = AIC - min(AIC)
+  )
+
+knitr::kable(aic_2g, digits = 1,
+             caption = "AIC comparison — 2-group (CONTROL vs GLAUCOMA)")
+```
+
+## Likelihood Ratio Test
+
+$$D = -2 \ln\!\left(\frac{L_{\text{parallel}}}{L_{\text{divergent}}}\right) \sim \chi^2$$
+
+The Parallel model is nested inside the Divergent model (it is the Divergent model
+with the constraint that both group shapes are identical). A significant p-value
+means the Divergent model fits significantly better.
+
+```{r lrt-chisq-2g}
+lrt_chisq_2g <- anova(m_par_2g, m_div_2g, test = "Chisq")
+print(lrt_chisq_2g)
+```
+
+The F-test is more conservative than Chi-squared and is recommended for
+Gaussian models where the residual variance is estimated rather than known.
+
+```{r lrt-f-2g}
+lrt_f_2g <- anova(m_par_2g, m_div_2g, test = "F")
+print(lrt_f_2g)
+```
+
+## Interpretation
+
+```{r interpret-2g, results='asis'}
+aic_diff_2g <- AIC(m_par_2g) - AIC(m_div_2g)
+lrt_p_chisq_2g <- lrt_chisq_2g[["Pr(>Chi)"]][2]
+lrt_p_f_2g     <- lrt_f_2g[["Pr(>F)"]][2]
+
+cat("### Two-Group Result\n\n")
+cat(sprintf("- **&Delta;AIC** (Parallel &minus; Divergent) = %.1f\n", aic_diff_2g))
+cat(sprintf("- **LRT p-value (Chi-sq)** = %.4f\n", lrt_p_chisq_2g))
+cat(sprintf("- **LRT p-value (F-test)** = %.4f\n\n", lrt_p_f_2g))
+
+chisq_sig <- !is.na(lrt_p_chisq_2g) && lrt_p_chisq_2g < 0.05
+f_sig     <- !is.na(lrt_p_f_2g) && lrt_p_f_2g < 0.05
+aic_sig   <- aic_diff_2g > 2
+
+if (chisq_sig && f_sig && aic_sig) {
+  cat("**All three criteria favour the Divergent model.** The non-linear spreading ",
+      "dynamics differ significantly between CONTROL and GLAUCOMA groups ",
+      "&mdash; the difference is not merely a baseline shift.\n")
+} else if (!chisq_sig && !f_sig && !aic_sig) {
+  cat("**No criterion favours the Divergent model.** The Parallel model ",
+      "is adequate: groups differ by a vertical shift, but their non-linear ",
+      "spreading dynamics follow the same shape.\n")
+} else {
+  cat("**Mixed results.** The criteria do not fully agree:\n\n")
+  cat(sprintf("- AIC: %s (|&Delta;AIC| = %.1f)\n",
+              ifelse(aic_sig, "favours Divergent", "no meaningful difference"), abs(aic_diff_2g)))
+  cat(sprintf("- Chi-squared LRT: %s (p = %.4f)\n",
+              ifelse(chisq_sig, "significant", "not significant"), lrt_p_chisq_2g))
+  cat(sprintf("- F-test LRT: %s (p = %.4f)\n\n",
+              ifelse(f_sig, "significant", "not significant"), lrt_p_f_2g))
+  cat("When tests disagree, the more conservative F-test should be given more weight.\n")
+}
+```
+
+## Predicted Curves
+
+```{r pred-2g, fig.height=5}
+time_grid <- seq(min(df$time_sec), max(df$time_sec), length.out = 200)
+
+pred_2g <- expand_grid(
+  time_sec  = time_grid,
+  condition = levels(df$condition)
+) %>%
+  mutate(
+    condition = factor(condition, levels = levels(df$condition)),
+    case = levels(df$case)[1]
+  )
+
+pred_2g$fit_par <- predict(m_par_2g, newdata = pred_2g, type = "response",
+                           exclude = "s(time_sec,case)")
+pred_2g$fit_div <- predict(m_div_2g, newdata = pred_2g, type = "response",
+                           exclude = "s(time_sec,case)")
+
+pred_2g_long <- pred_2g %>%
+  select(time_sec, condition, fit_par, fit_div) %>%
+  pivot_longer(
+    cols = c(fit_par, fit_div),
+    names_to = "model",
+    values_to = "fit"
+  ) %>%
+  mutate(model = recode(model,
+    "fit_par" = "Parallel",
+    "fit_div" = "Divergent"
+  ))
+
+ggplot(pred_2g_long, aes(x = time_sec, y = fit, colour = condition)) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~model) +
+  scale_colour_manual(values = condition_cols, labels = LABEL_MAP) +
+  labs(
+    x = "Time (s)",
+    y = expression(Area ~ (cm^2)),
+    colour = "Group"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+## Group Difference — Divergent Model
+
+```{r diff-2g, fig.height=5}
+Xp_2g <- predict(m_div_2g, newdata = pred_2g, type = "lpmatrix",
+                 exclude = "s(time_sec,case)")
+Vcov_2g <- vcov(m_div_2g)
+
+idx_ctrl_2g <- which(pred_2g$condition == "CONTROL")
+idx_glau_2g <- which(pred_2g$condition == "GLAUCOMA")
+
+Xp_diff_2g <- Xp_2g[idx_glau_2g, ] - Xp_2g[idx_ctrl_2g, ]
+
+diff_2g <- tibble(
+  time_sec   = time_grid,
+  difference = pred_2g$fit_div[idx_glau_2g] - pred_2g$fit_div[idx_ctrl_2g],
+  se         = sqrt(rowSums((Xp_diff_2g %*% Vcov_2g) * Xp_diff_2g))
+) %>%
+  mutate(
+    lower = difference - 1.96 * se,
+    upper = difference + 1.96 * se
+  )
+
+ggplot(diff_2g, aes(x = time_sec, y = difference)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2, fill = condition_cols["GLAUCOMA"]) +
+  geom_line(linewidth = 1, colour = condition_cols["GLAUCOMA"]) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
+  labs(
+    x = "Time (s)",
+    y = expression(Delta ~ Area ~ (cm^2)),
+    title = "glaucoma \u2212 control difference (Divergent model)",
+    subtitle = "95% CI via linear predictor matrix (Wood 2017, \u00a77.2.5)"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+
+# 3. Three-Group Comparison
+
+Same approach with the full three-level group factor:
+CONTROL vs GLAUCOMA − URAMOX vs GLAUCOMA + URAMOX.
+
+## Fit Models
+
+```{r fit-3g}
+m_par_3g <- gam(
+  area_cm2 ~ group +
+    s(time_sec, k = 20, bs = "cr") +
+    s(time_sec, case, bs = "fs", k = 10),
+  data = df, method = "ML"
+)
+
+m_div_3g <- gam(
+  area_cm2 ~ group +
+    s(time_sec, by = group, k = 20, bs = "cr") +
+    s(time_sec, case, bs = "fs", k = 10),
+  data = df, method = "ML"
+)
+```
+
+## Model Summaries
+
+```{r summary-par-3g}
+summary(m_par_3g)
+```
+
+```{r summary-div-3g}
+summary(m_div_3g)
+```
+
+## Parametric Coefficients (Intercepts)
+
+```{r coef-3g}
+ptab_par_3g <- as.data.frame(summary(m_par_3g)$p.table) %>%
+  rownames_to_column("Term") %>%
+  mutate(Model = "Parallel")
+ptab_div_3g <- as.data.frame(summary(m_div_3g)$p.table) %>%
+  rownames_to_column("Term") %>%
+  mutate(Model = "Divergent")
+
+coef_3g <- bind_rows(ptab_par_3g, ptab_div_3g) %>%
+  select(Model, Term, Estimate, `Std. Error`, `t value`, `Pr(>|t|)`)
+
+knitr::kable(coef_3g, digits = 4,
+             caption = "Parametric coefficients — 3-group models")
+```
+
+```{r coef-interpret-3g, results='asis'}
+grp_terms <- c("groupGLAUCOMA - URAMOX", "groupGLAUCOMA + URAMOX")
+grp_labels <- c("GLAUCOMA\u2212URAMOX", "GLAUCOMA+URAMOX")
+
+cat("### Intercept Conclusions — 3-Group\n\n")
+
+for (i in seq_along(grp_terms)) {
+  par_c <- get_coef(m_par_3g, grp_terms[i])
+  div_c <- get_coef(m_div_3g, grp_terms[i])
+
+  cat(sprintf("**%s vs CONTROL:**\n\n", grp_labels[i]))
+  cat(sprintf("- Parallel: **%.3f cm\u00b2** (SE = %.3f, p = %.4f)\n",
+              par_c$est, par_c$se, par_c$p))
+  cat(sprintf("- Divergent: **%.3f cm\u00b2** (SE = %.3f, p = %.4f)\n",
+              div_c$est, div_c$se, div_c$p))
+
+  shift_change <- abs(par_c$est - div_c$est)
+  if (shift_change < 0.1 * max(abs(par_c$est), 1e-6)) {
+    cat(sprintf("- Intercept shift is stable across models (\u0394 = %.3f cm\u00b2).\n",
+                shift_change))
+  } else {
+    cat(sprintf("- Intercept changes notably between models (\u0394 = %.3f cm\u00b2), ",
+                shift_change))
+    cat("suggesting shape differences absorb part of the level shift.\n")
+  }
+
+  if (par_c$p < 0.05 && div_c$p < 0.05) {
+    cat("- Significant in **both** models: robust mean-level difference from CONTROL.\n\n")
+  } else if (par_c$p < 0.05 && div_c$p >= 0.05) {
+    cat("- Significant only in the **Parallel** model: the apparent level shift is ",
+        "partly explained by different curve shapes.\n\n")
+  } else if (par_c$p >= 0.05 && div_c$p >= 0.05) {
+    cat("- **Not significant** in either model: no evidence of a mean-level difference.\n\n")
+  } else {
+    cat("- Significant only in the **Divergent** model: warrants careful inspection.\n\n")
+  }
+}
+```
+
+## AIC Comparison
+
+```{r aic-3g}
+aic_3g <- AIC(m_par_3g, m_div_3g) %>%
+  as.data.frame() %>%
+  rownames_to_column("model") %>%
+  mutate(
+    model = c("Parallel", "Divergent"),
+    delta_AIC = AIC - min(AIC)
+  )
+
+knitr::kable(aic_3g, digits = 1,
+             caption = "AIC comparison — 3-group")
+```
+
+## Likelihood Ratio Test
+
+```{r lrt-chisq-3g}
+lrt_chisq_3g <- anova(m_par_3g, m_div_3g, test = "Chisq")
+print(lrt_chisq_3g)
+```
+
+```{r lrt-f-3g}
+lrt_f_3g <- anova(m_par_3g, m_div_3g, test = "F")
+print(lrt_f_3g)
+```
+
+## Interpretation
+
+```{r interpret-3g, results='asis'}
+aic_diff_3g <- AIC(m_par_3g) - AIC(m_div_3g)
+lrt_p_chisq_3g <- lrt_chisq_3g[["Pr(>Chi)"]][2]
+lrt_p_f_3g     <- lrt_f_3g[["Pr(>F)"]][2]
+
+cat("### Three-Group Result\n\n")
+cat(sprintf("- **&Delta;AIC** (Parallel &minus; Divergent) = %.1f\n", aic_diff_3g))
+cat(sprintf("- **LRT p-value (Chi-sq)** = %.4f\n", lrt_p_chisq_3g))
+cat(sprintf("- **LRT p-value (F-test)** = %.4f\n\n", lrt_p_f_3g))
+
+chisq_sig <- !is.na(lrt_p_chisq_3g) && lrt_p_chisq_3g < 0.05
+f_sig     <- !is.na(lrt_p_f_3g) && lrt_p_f_3g < 0.05
+aic_sig   <- aic_diff_3g > 2
+
+if (chisq_sig && f_sig && aic_sig) {
+  cat("**All three criteria favour the Divergent model.** At least one group has ",
+      "non-linear spreading dynamics that differ from the others.\n")
+} else if (!chisq_sig && !f_sig && !aic_sig) {
+  cat("**No criterion favours the Divergent model.** The Parallel model ",
+      "is adequate: all three groups follow the same non-linear shape, ",
+      "differing only in baseline area.\n")
+} else {
+  cat("**Mixed results.** The criteria do not fully agree:\n\n")
+  cat(sprintf("- AIC: %s (|&Delta;AIC| = %.1f)\n",
+              ifelse(aic_sig, "favours Divergent", "no meaningful difference"), abs(aic_diff_3g)))
+  cat(sprintf("- Chi-squared LRT: %s (p = %.4f)\n",
+              ifelse(chisq_sig, "significant", "not significant"), lrt_p_chisq_3g))
+  cat(sprintf("- F-test LRT: %s (p = %.4f)\n\n",
+              ifelse(f_sig, "significant", "not significant"), lrt_p_f_3g))
+  cat("When tests disagree, the more conservative F-test should be given more weight.\n")
+}
+```
+
+## Predicted Curves
+
+```{r pred-3g, fig.height=5}
+pred_3g <- expand_grid(
+  time_sec = time_grid,
+  group    = levels(df$group)
+) %>%
+  mutate(
+    group = factor(group, levels = levels(df$group)),
+    case  = levels(df$case)[1]
+  )
+
+pred_3g$fit_par <- predict(m_par_3g, newdata = pred_3g, type = "response",
+                           exclude = "s(time_sec,case)")
+pred_3g$fit_div <- predict(m_div_3g, newdata = pred_3g, type = "response",
+                           exclude = "s(time_sec,case)")
+
+pred_3g_long <- pred_3g %>%
+  select(time_sec, group, fit_par, fit_div) %>%
+  pivot_longer(
+    cols = c(fit_par, fit_div),
+    names_to = "model",
+    values_to = "fit"
+  ) %>%
+  mutate(model = recode(model,
+    "fit_par" = "Parallel",
+    "fit_div" = "Divergent"
+  ))
+
+ggplot(pred_3g_long, aes(x = time_sec, y = fit, colour = group)) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~model) +
+  scale_colour_manual(values = group_cols, labels = LABEL_MAP) +
+  labs(
+    x = "Time (s)",
+    y = expression(Area ~ (cm^2)),
+    colour = "Group"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+## Group Differences — Divergent Model
+
+```{r diff-3g, fig.height=5}
+Xp_3g <- predict(m_div_3g, newdata = pred_3g, type = "lpmatrix",
+                 exclude = "s(time_sec,case)")
+Vcov_3g <- vcov(m_div_3g)
+
+idx_ctrl_3g  <- which(pred_3g$group == "CONTROL")
+idx_minus_3g <- which(pred_3g$group == "GLAUCOMA - URAMOX")
+idx_plus_3g  <- which(pred_3g$group == "GLAUCOMA + URAMOX")
+
+Xp_diff_minus <- Xp_3g[idx_minus_3g, ] - Xp_3g[idx_ctrl_3g, ]
+Xp_diff_plus  <- Xp_3g[idx_plus_3g, ]  - Xp_3g[idx_ctrl_3g, ]
+
+diff_3g <- bind_rows(
+  tibble(
+    time_sec   = time_grid,
+    difference = pred_3g$fit_div[idx_minus_3g] - pred_3g$fit_div[idx_ctrl_3g],
+    se         = sqrt(rowSums((Xp_diff_minus %*% Vcov_3g) * Xp_diff_minus)),
+    contrast   = "GLAUCOMA\u2212URAMOX vs CONTROL"
+  ),
+  tibble(
+    time_sec   = time_grid,
+    difference = pred_3g$fit_div[idx_plus_3g] - pred_3g$fit_div[idx_ctrl_3g],
+    se         = sqrt(rowSums((Xp_diff_plus %*% Vcov_3g) * Xp_diff_plus)),
+    contrast   = "GLAUCOMA+URAMOX vs CONTROL"
+  )
+) %>%
+  mutate(
+    lower = difference - 1.96 * se,
+    upper = difference + 1.96 * se
+  )
+
+ggplot(diff_3g, aes(x = time_sec, y = difference, colour = contrast, fill = contrast)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2, colour = NA) +
+  geom_line(linewidth = 1) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
+  scale_colour_manual(values = contrast_cols, labels = LABEL_MAP) +
+  scale_fill_manual(values = contrast_cols, labels = LABEL_MAP) +
+  labs(
+    x = "Time (s)",
+    y = expression(Delta ~ Area ~ (cm^2)),
+    colour = "Contrast",
+    fill = "Contrast",
+    title = "Group differences — Divergent model (3-group)",
+    subtitle = "95% CI via linear predictor matrix (Wood 2017, \u00a77.2.5)"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+
+# 4. Diagnostics
+
+```{r diag-par, fig.height=7}
+cat("=== Parallel model (3-group) ===\n")
+par(mfrow = c(2, 2))
+gam.check(m_par_3g)
+```
+
+```{r diag-div, fig.height=7}
+cat("=== Divergent model (3-group) ===\n")
+par(mfrow = c(2, 2))
+gam.check(m_div_3g)
+```
+
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```
