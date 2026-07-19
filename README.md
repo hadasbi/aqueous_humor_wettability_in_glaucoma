@@ -38,8 +38,6 @@ Run order: `01` first (only if regenerating the CSV), then any analysis script.
 | **Figure 7** | `13_gamm_comparison_R.Rmd` | Population-level GAMM predicted curves, Parallel vs Divergent models — 2-group (Supplementary). |
 | **Figure 8** | `13_gamm_comparison_R.Rmd` | Population-level GAMM predicted curves, Parallel vs Divergent models — 3-group (Supplementary). |
 
-*(Figures 7 and 8 are presented in the paper's Supplementary Material but are numbered continuously as main figures. There are 8 figures total; Figures 1–6 are main-text figures.)*
-
 `13_plan_gamm_comparison_R.md` and `13_gamm_comparison_R_parameters.md` document the modeling rationale and parameter choices for `13`.
 
 ## Requirements
