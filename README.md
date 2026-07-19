@@ -1,4 +1,4 @@
-# Aqueous Humor Wettability in Glaucoma patients
+# Aqueous Humor Wettability in Glaucoma Patients
 
 Analysis code for the paper on eye-surface liquid spreading dynamics, comparing spreading area over time between clinical groups.
 
